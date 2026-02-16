@@ -1,4 +1,4 @@
-package com.javabridge.springrabbitmq;
+package com.springrabbitmq;
 
 import org.springframework.amqp.rabbit.annotation.EnableRabbit;
 import org.springframework.boot.SpringApplication;
