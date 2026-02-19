@@ -1,0 +1,174 @@
+### Payment Controller HTTP Test Requests
+### Base URL - Update if your application runs on a different port
+@baseUrl = http://localhost:8080
+@contentType = application/json
+
+### 1. Valid Payment Request - Basic
+POST {{baseUrl}}/payments
+Content-Type: {{contentType}}
+
+{
+  "id": "PAY-001",
+  "dateTime": "2024-01-15T10:30:00",
+  "value": "100.50"
+}
+
+### 2. Valid Payment Request - Large Amount
+POST {{baseUrl}}/payments
+Content-Type: {{contentType}}
+
+{
+  "id": "PAY-002",
+  "dateTime": "2024-01-15T14:45:30",
+  "value": "9999.99"
+}
+
+### 3. Valid Payment Request - Small Amount
+POST {{baseUrl}}/payments
+Content-Type: {{contentType}}
+
+{
+  "id": "PAY-003",
+  "dateTime": "2024-01-15T09:00:00",
+  "value": "0.01"
+}
+
+### 4. Valid Payment Request - Different DateTime Format
+POST {{baseUrl}}/payments
+Content-Type: {{contentType}}
+
+{
+  "id": "PAY-004",
+  "dateTime": "2024-12-31T23:59:59",
+  "value": "500.00"
+}
+
+### 5. Valid Payment Request - UUID as ID
+POST {{baseUrl}}/payments
+Content-Type: {{contentType}}
+
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "dateTime": "2024-01-15T12:00:00",
+  "value": "250.75"
+}
+
+### 6. Edge Case - Empty String Values (May fail validation)
+POST {{baseUrl}}/payments
+Content-Type: {{contentType}}
+
+{
+  "id": "",
+  "dateTime": "",
+  "value": ""
+}
+
+### 7. Edge Case - Null Values (May fail validation)
+POST {{baseUrl}}/payments
+Content-Type: {{contentType}}
+
+{
+  "id": null,
+  "dateTime": null,
+  "value": null
+}
+
+### 8. Edge Case - Missing Fields (May fail validation)
+POST {{baseUrl}}/payments
+Content-Type: {{contentType}}
+
+{
+  "id": "PAY-005"
+}
+
+### 9. Edge Case - Extra Fields (Should be ignored or cause error)
+POST {{baseUrl}}/payments
+Content-Type: {{contentType}}
+
+{
+  "id": "PAY-006",
+  "dateTime": "2024-01-15T10:30:00",
+  "value": "100.50",
+  "extraField": "should not be here"
+}
+
+### 10. Edge Case - Very Long ID
+POST {{baseUrl}}/payments
+Content-Type: {{contentType}}
+
+{
+  "id": "PAY-001-VERY-LONG-ID-THAT-MIGHT-CAUSE-ISSUES-IF-THERE-IS-A-LENGTH-LIMIT",
+  "dateTime": "2024-01-15T10:30:00",
+  "value": "100.50"
+}
+
+### 11. Edge Case - Negative Value (as string)
+POST {{baseUrl}}/payments
+Content-Type: {{contentType}}
+
+{
+  "id": "PAY-007",
+  "dateTime": "2024-01-15T10:30:00",
+  "value": "-100.50"
+}
+
+### 12. Edge Case - Zero Value
+POST {{baseUrl}}/payments
+Content-Type: {{contentType}}
+
+{
+  "id": "PAY-008",
+  "dateTime": "2024-01-15T10:30:00",
+  "value": "0"
+}
+
+### 13. Edge Case - Special Characters in ID
+POST {{baseUrl}}/payments
+Content-Type: {{contentType}}
+
+{
+  "id": "PAY-@#$%^&*()",
+  "dateTime": "2024-01-15T10:30:00",
+  "value": "100.50"
+}
+
+### 14. Edge Case - Invalid DateTime Format
+POST {{baseUrl}}/payments
+Content-Type: {{contentType}}
+
+{
+  "id": "PAY-009",
+  "dateTime": "invalid-date-format",
+  "value": "100.50"
+}
+
+### 15. Performance Test - Rapid Sequential Requests
+POST {{baseUrl}}/payments
+Content-Type: {{contentType}}
+
+{
+  "id": "PAY-PERF-001",
+  "dateTime": "2024-01-15T10:30:00",
+  "value": "100.50"
+}
+
+###
+POST {{baseUrl}}/payments
+Content-Type: {{contentType}}
+
+{
+  "id": "PAY-PERF-002",
+  "dateTime": "2024-01-15T10:30:01",
+  "value": "200.50"
+}
+
+###
+POST {{baseUrl}}/payments
+Content-Type: {{contentType}}
+
+{
+  "id": "PAY-PERF-003",
+  "dateTime": "2024-01-15T10:30:02",
+  "value": "300.50"
+}
+
