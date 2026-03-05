@@ -149,6 +149,7 @@ Accepts payment requests via REST API and publishes them to a RabbitMQ exchange.
 - [Configuration](#configuration)
 - [API Documentation](#api-documentation)
 - [RabbitMQ Setup](#rabbitmq-setup)
+- [Adding Additional Consumers](#adding-additional-consumers)
 - [Running](#running)
 - [Testing](#testing)
 - [Project Structure](#project-structure)
@@ -300,6 +301,62 @@ spring.application.name=spring-rabbitmq
 3. Bind queue to exchange with routing key payment-rk
 
 Or add RabbitMQConfig class with @Bean for DirectExchange, Queue, Binding.
+
+---
+
+## Adding Additional Consumers
+
+### Option A: Competing consumers (same queue, load balancing)
+
+Multiple consumers can listen to the same queue. Each message is delivered to **one** consumer only (round-robin). Use this for horizontal scaling and load distribution.
+
+Add another consumer:
+
+```java
+@Component
+public class PaymentSecondaryConsumer {
+
+    @RabbitListener(queues = {"payment-queue"})
+    public void process(@Payload String message) {
+        System.out.println("[SECONDARY] Message received: " + message);
+    }
+}
+```
+
+No extra RabbitMQ setup. Messages are shared between `PaymentConsumer` and `PaymentSecondaryConsumer`.
+
+---
+
+### Option B: Same message to multiple consumers (two queues)
+
+If **both** consumers must process **every** message (e.g. processing + audit), use two queues bound to the same exchange with the same routing key.
+
+1. Create a second queue `payment-queue-audit`
+2. Bind it to `payment-exchange` with key `payment-rk`
+3. Add the audit consumer:
+
+```java
+@Component
+public class PaymentAuditConsumer {
+
+    @RabbitListener(queues = "payment-queue-audit")
+    public void process(@Payload String message) {
+        System.out.println("[AUDIT] Message received: " + message);
+    }
+}
+```
+
+Flow:
+
+```
+payment-exchange (routing key: payment-rk)
+         |
+    +----+----+
+    v         v
+payment-queue   payment-queue-audit
+    v         v
+PaymentConsumer   PaymentAuditConsumer
+```
 
 ---
 
