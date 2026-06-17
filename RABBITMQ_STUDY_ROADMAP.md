@@ -44,6 +44,7 @@ If any of these are weak, spend 2-3 days refreshing first.
 
 - Why brokers exist: decoupling, async workflows, and traffic buffering
 - AMQP primitives: producer, consumer, exchange, queue, binding, routing key
+- Binding connects exchange to queue; routing key on publish must match binding key (direct) or pattern (topic)
 - Delivery basics: durable queue, persistent message, acknowledgements
 
 #### What to Practice
@@ -63,6 +64,7 @@ If any of these are weak, spend 2-3 days refreshing first.
 #### What to Understand
 
 - `direct` for exact match, `topic` for wildcard pattern routing, `fanout` for broadcast
+- Binding key vs routing key: producer sets routing key; binding defines what the exchange matches
 - Competing consumers and their impact on ordering
 - Message schema/versioning strategy for backward compatibility
 
@@ -155,6 +157,308 @@ If any of these are weak, spend 2-3 days refreshing first.
 
 ---
 
+## 2.2) Bindings and Routing Keys (Deep Dive)
+
+Bindings and routing keys are the core mechanism that decides **which queue receives which message**. Without a correct binding, messages are published successfully but never reach a consumer.
+
+### What is a Routing Key?
+
+A **routing key** is a string that the **producer attaches to a message** when publishing to an exchange.
+
+Think of it as a **label on an envelope** — it tells the exchange where the message should go, but the exchange decides the final destination based on its rules and bindings.
+
+**Key points:**
+
+- Set by the **producer** at publish time
+- Passed as the second argument in Spring AMQP: `convertAndSend(exchange, routingKey, message)`
+- The exchange uses it to **match** against binding keys
+- It is **not** the queue name (though with the default exchange, routing key equals queue name)
+- It can be any string; conventions like `payment.created` or `order.shipped` improve readability
+
+**Example from this project:**
+
+```java
+amqpTemplate.convertAndSend("payment-exchange", "payment-rk", paymentJson);
+//                                    exchange         ↑
+//                                              routing key
+```
+
+Here, `payment-rk` is the routing key. The producer says: "Send this message to `payment-exchange` and label it `payment-rk`."
+
+**Analogy:** A routing key is like writing **"Billing Department"** on a package before dropping it at the central mail room (exchange). The mail room uses that label to decide which internal bins (queues) receive the package.
+
+---
+
+### What is a Binding?
+
+A **binding** is a **rule that connects an exchange to a queue**. It tells the exchange: "When a message matches this rule, deliver it to this queue."
+
+A binding has two parts:
+
+1. **Which queue** receives the message
+2. **Which messages** qualify — defined by the **binding key** (and exchange type)
+
+**Key points:**
+
+- Created by an **administrator or application config** (not by the producer at publish time)
+- Without a binding, a queue will **never** receive messages from that exchange — even if the queue exists
+- One queue can have **multiple bindings** (to different exchanges or with different keys)
+- One exchange can have **many bindings** (to many queues)
+- Bindings are **persistent** until explicitly removed
+
+**Visual representation:**
+
+```
+                    payment-exchange (direct)
+                           |
+              binding: payment-rk
+                           |
+                           v
+                    payment-queue  →  PaymentConsumer
+```
+
+**In RabbitMQ terms:**
+
+```
+Binding = Exchange + Queue + Binding Key (+ optional arguments)
+```
+
+**Analogy:** A binding is like a **mail sorting rule** at the central mail room: "All packages labeled `Billing Department` go to bin #3 (payment-queue)." The producer only writes the label; the binding rule decides which bin gets it.
+
+---
+
+### How Routing Key and Binding Work Together
+
+| Who sets it | What | When |
+|-------------|------|------|
+| **Producer** | Routing key | At publish time (per message) |
+| **Admin / Config** | Binding (with binding key) | Once, when topology is set up |
+
+**The matching process:**
+
+1. Producer publishes message to exchange with routing key `payment-rk`
+2. Exchange looks at all bindings attached to it
+3. For each binding, it compares routing key vs binding key (rules depend on exchange type)
+4. Every matching binding forwards a copy of the message to its queue
+
+**Simple direct exchange example:**
+
+```
+Producer publishes:  exchange=payment-exchange, routing key=payment-rk
+
+Binding 1:  payment-queue     ← payment-exchange, binding key=payment-rk   ✓ MATCH
+Binding 2:  audit-queue       ← payment-exchange, binding key=payment-rk   ✓ MATCH
+Binding 3:  other-queue       ← payment-exchange, binding key=other-key    ✗ NO MATCH
+
+Result: message goes to payment-queue AND audit-queue (not to other-queue)
+```
+
+**Important distinction:**
+
+- **Routing key** = dynamic, chosen per message by the producer
+- **Binding key** = static, defined when you create the binding
+- They are often the **same value** in direct exchanges, but they play different roles
+
+---
+
+### Core Concepts
+
+| Concept | Role |
+|---------|------|
+| **Exchange** | Receives messages from producers and routes them to queues |
+| **Queue** | Stores messages until a consumer processes them |
+| **Binding** | A link between an exchange and a queue, optionally with a **binding key** |
+| **Routing key** | A string set by the producer on publish; the exchange uses it to match bindings |
+| **Binding key** | The pattern or exact value on the binding side used for matching |
+
+**Message flow:**
+
+```
+Producer → Exchange (routing key) → Binding match → Queue → Consumer
+```
+
+The producer never sends directly to a queue. It publishes to an exchange with a routing key. The exchange evaluates all bindings and forwards copies to every queue whose binding matches.
+
+### Binding Key vs Routing Key
+
+- On **publish**, the producer sets the **routing key** (e.g. `payment-rk`, `payment.created`).
+- On **bind**, you attach a queue to an exchange with a **binding key** (or pattern).
+- For `direct` and `topic` exchanges, matching rules compare routing key against binding key.
+- For `fanout` exchanges, binding keys are ignored — every bound queue receives every message.
+- For `headers` exchanges, matching uses message headers instead of routing keys.
+
+### Behavior by Exchange Type
+
+#### Direct Exchange (exact match)
+
+- Routing key must **exactly equal** binding key.
+- One routing key can match **multiple queues** if several queues are bound with the same key.
+- Use case: point-to-point routing, work queues, selective delivery.
+
+**Example (this repository):**
+
+```
+Exchange:  payment-exchange (direct)
+Routing key on publish: payment-rk
+Binding:   payment-queue → payment-exchange, binding key = payment-rk
+```
+
+```java
+// Producer
+amqpTemplate.convertAndSend("payment-exchange", "payment-rk", message);
+
+// Consumer
+@RabbitListener(queues = "payment-queue")
+```
+
+If you publish with routing key `payment-rk` but the queue is bound with `payment-other`, the message is **not** delivered — it is dropped (unless alternate exchange is configured).
+
+**Multiple queues, same message:** bind two queues to the same direct exchange with the same binding key `payment-rk`. Both queues receive a copy.
+
+#### Topic Exchange (pattern match)
+
+- Binding key uses wildcards:
+  - `*` matches exactly one word (dot-separated segment)
+  - `#` matches zero or more words
+- Routing key words are separated by `.` (e.g. `payment.created.brazil`).
+
+**Examples:**
+
+| Binding key | Routing key | Match? |
+|-------------|-------------|--------|
+| `payment.created` | `payment.created` | Yes |
+| `payment.*` | `payment.created` | Yes |
+| `payment.*` | `payment.created.brazil` | No |
+| `payment.#` | `payment.created.brazil` | Yes |
+| `*.failed` | `payment.failed` | Yes |
+| `#` | anything | Yes |
+
+Use case: event-driven architectures, domain events, multi-tenant routing.
+
+#### Fanout Exchange (broadcast)
+
+- Ignores routing key and binding key.
+- Every queue bound to the exchange receives every message.
+- Use case: notifications, cache invalidation, audit fan-out.
+
+```
+Exchange: notification-exchange (fanout)
+Bindings: email-queue, sms-queue, push-queue (no key needed)
+→ One publish delivers to all three queues
+```
+
+#### Headers Exchange (attribute match)
+
+- Ignores routing key; matches on message headers (`x-match: all` or `any`).
+- Less common; useful when routing logic is too complex for topic patterns.
+
+### How Matching Works (Mental Model)
+
+1. Producer publishes to exchange `E` with routing key `RK`.
+2. Exchange `E` loads all bindings for that exchange.
+3. For each binding, the exchange applies its type-specific match rule.
+4. For every match, a copy of the message is routed to the bound queue.
+5. If no binding matches, the message is silently dropped (default behavior).
+
+### Common Binding and Routing Mistakes
+
+| Mistake | Symptom | Fix |
+|---------|---------|-----|
+| Queue exists but no binding | Messages published, queue stays empty | Create binding exchange → queue |
+| Wrong routing key on publish | Same as above | Align producer routing key with binding key |
+| Typo in binding key (`payment_rk` vs `payment-rk`) | No delivery | Inspect bindings with `rabbitmqctl list_bindings` |
+| Expecting fanout behavior on direct exchange | Only one queue receives messages | Use fanout or bind multiple queues with same key |
+| Expecting load balancing across consumers on different queues | Each queue gets all messages | Use one queue with multiple consumers (competing consumers) |
+| Publishing to default exchange with wrong routing key | Message goes to wrong or non-existent queue | Default exchange routes by queue name; prefer named exchanges in production |
+| Binding key pattern too broad (`#`) | Unexpected queues receive sensitive events | Narrow patterns per domain (`payment.*`, `order.#`) |
+
+### Creating Bindings
+
+**Management UI:** Exchanges → select exchange → Add binding → choose queue and binding key.
+
+**rabbitmqadmin:**
+
+```bash
+rabbitmqadmin declare binding source=payment-exchange destination=payment-queue routing_key=payment-rk
+```
+
+**rabbitmqctl (inspect only):**
+
+```bash
+rabbitmqctl list_bindings
+rabbitmqctl list_bindings source exchange_name
+```
+
+**Spring AMQP:**
+
+```java
+@Bean
+Binding paymentBinding(Queue paymentQueue, DirectExchange paymentExchange) {
+    return BindingBuilder.bind(paymentQueue)
+        .to(paymentExchange)
+        .with("payment-rk");
+}
+```
+
+**Topic binding example:**
+
+```java
+@Bean
+Binding paymentCreatedBinding(Queue paymentCreatedQueue, TopicExchange eventsExchange) {
+    return BindingBuilder.bind(paymentCreatedQueue)
+        .to(eventsExchange)
+        .with("payment.created");
+}
+```
+
+### Inspecting Bindings in Troubleshooting
+
+When messages are missing, always verify the binding chain:
+
+```bash
+# List all bindings (source, destination, routing key)
+rabbitmqctl list_bindings
+
+# Filter by exchange
+rabbitmqctl list_bindings source payment-exchange
+
+# Management API
+curl -u guest:guest http://localhost:15672/api/bindings
+```
+
+**Checklist:**
+
+1. Does the exchange exist and have the expected type?
+2. Is the queue bound to that exchange?
+3. Does the binding key match the routing key used on publish (or pattern for topic)?
+4. Is the producer publishing to the correct vhost?
+5. Does the user have `write` on the exchange and `read` on the queue?
+
+### Design Guidelines
+
+- **Name routing keys consistently** — use dot notation for topics (`domain.action`, `payment.created`, `order.shipped`).
+- **One binding key per intent** — avoid reusing the same key for unrelated flows unless you want duplicate delivery.
+- **Document your topology** — exchange type, queues, bindings, and routing keys should be in README or infra-as-code.
+- **Prefer explicit config** — declare exchanges, queues, and bindings in code (`@Configuration`) or Terraform/Helm rather than manual UI setup in production.
+- **Use alternate exchange** — for unroutable messages, configure an alternate exchange to catch publishes that match no binding (avoids silent loss).
+
+### Hands-on Exercises
+
+1. Publish to `payment-exchange` with routing key `payment-rk` and confirm delivery to `payment-queue`.
+2. Change the routing key to `wrong-key` and observe the queue stays empty; inspect bindings.
+3. Add a second queue bound with the same key and confirm both receive the message.
+4. Switch to topic exchange: bind `payment.*` and test `payment.created` vs `payment.created.brazil`.
+5. Remove a binding while the app is running and observe consumer starvation.
+
+### Exit Criteria
+
+- You can explain the difference between routing key and binding key.
+- You can predict which queues receive a message given exchange type, bindings, and routing key.
+- You can diagnose "messages not arriving" by inspecting bindings in under 5 minutes.
+- You can choose direct vs topic vs fanout for a given business scenario.
+
+---
+
 ## 3) Stage-by-Stage Roadmap
 
 ## Stage 1 - Foundation (Week 1-2)
@@ -176,6 +480,13 @@ If any of these are weak, spend 2-3 days refreshing first.
   - headers (less common)
 - Queue durability, message persistence, acknowledgements
 - Virtual hosts and users
+- **Bindings and routing keys (intro):**
+  - **Routing key**: label on the message set by the producer at publish time
+  - **Binding**: rule linking an exchange to a queue (with a binding key)
+  - Producer sets routing key; admin/config creates bindings
+  - Direct exchange: routing key must exactly match binding key
+  - Unroutable messages are dropped unless alternate exchange is configured
+  - See [section 2.2](#22-bindings-and-routing-keys-deep-dive) for full conceptual explanation
 
 ### Hands-on
 
@@ -191,12 +502,16 @@ docker run -d --name rabbitmq ^
   - Publish a message
   - Consume a message
   - Verify message flow in the UI
+- Create binding manually: `payment-queue` → `payment-exchange` with key `payment-rk`
+- Publish with wrong routing key and confirm message does not arrive; fix binding/key mismatch
+- Run `rabbitmqctl list_bindings` and map output to your topology
 
 ### Exit Criteria
 
 - You can explain message flow from producer to consumer
 - You can create queue/exchange/binding manually in UI
 - You can send and receive at least one message end-to-end
+- You can explain why a message might be published but never consumed (missing or mismatched binding)
 
 ---
 
@@ -214,6 +529,13 @@ docker run -d --name rabbitmq ^
   - direct routing (exact match)
   - topic routing (wildcards `*` and `#`)
   - pub/sub with fanout
+- **Bindings and routing keys (applied):**
+  - Binding key vs routing key in practice
+  - Multiple queues bound with same key (duplicate delivery)
+  - One queue, multiple consumers (competing consumers — not a binding concern)
+  - Topic patterns: `payment.*`, `payment.#`, `*.failed`
+  - Silent message loss when no binding matches
+  - Alternate exchange for unroutable messages
 - Competing consumers
 - Message ordering constraints
 - TTL (message/queue), auto-delete, exclusive queues
@@ -230,12 +552,18 @@ docker run -d --name rabbitmq ^
   - `payment.failed`
   - `payment.*`
   - `payment.#`
+- Binding lab:
+  - Bind two queues to same direct exchange with key `payment-rk`; confirm both receive message
+  - Bind one queue with `payment.*` on topic exchange; test matching and non-matching keys
+  - Remove binding and observe queue starvation; restore and verify recovery
 
 ### Exit Criteria
 
 - You can choose the right exchange type by use case
 - You can reason about ordering and parallel consumers
 - You can define a stable message schema for integration
+- You can design binding topology so the right queues receive the right messages
+- You can debug routing issues using `list_bindings` and Management UI
 
 ---
 
@@ -388,7 +716,8 @@ Use this sequence when something breaks:
    Ready vs unacked messages, consumer count, ingress/egress rates.
 
 4. **Validate bindings/routing**  
-   Exchange type, binding keys, and published routing key match expected pattern.
+   Exchange type, binding keys, and published routing key match expected pattern.  
+   Run `rabbitmqctl list_bindings source <exchange>` and confirm queue is bound with correct key.
 
 5. **Check acknowledgements**  
    Are consumers acking? Are messages repeatedly requeued?
@@ -408,8 +737,12 @@ Use this sequence when something breaks:
 
 - **Messages not arriving in queue**
   - Verify exchange exists and routing key matches a binding
+  - Run `rabbitmqctl list_bindings` — confirm queue is bound to exchange with correct binding key
+  - Compare producer routing key vs binding key (exact for direct, pattern for topic)
+  - Check exchange type: fanout ignores keys; direct requires exact match
   - Confirm producer publishes to correct vhost
   - Check permissions (`configure`, `write`, `read`)
+  - If message is dropped (no matching binding), consider alternate exchange to capture unroutable publishes
 
 - **Queue keeps growing**
   - Consumers down or too slow
@@ -469,6 +802,26 @@ rabbitmqctl purge_queue payment-queue
 ```bash
 rabbitmqctl list_exchanges name type durable
 rabbitmqctl list_bindings
+rabbitmqctl list_bindings source payment-exchange
+rabbitmqctl list_bindings destination payment-queue
+```
+
+**Reading `list_bindings` output:**
+
+```
+source_name    source_kind    destination_name    routing_key
+payment-exchange  exchange    payment-queue       payment-rk
+```
+
+- `source_name` = exchange messages are published to
+- `routing_key` = binding key used for matching
+- `destination_name` = queue that receives matched messages
+
+**Declare binding via rabbitmqadmin:**
+
+```bash
+rabbitmqadmin declare binding source=payment-exchange destination=payment-queue routing_key=payment-rk
+rabbitmqadmin declare binding source=events-exchange destination=payment-created-queue routing_key=payment.created
 ```
 
 ### Policies and DLQ Support
